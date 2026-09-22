@@ -7,7 +7,7 @@
 
 name: Build free cloud-sync
 
-on:
+'on':
   workflow_dispatch:
     inputs:
       release:
@@ -294,11 +294,7 @@ jobs:
             -keypass readest123 \
             -dname "CN=Readest, OU=Readest, O=Readest, C=US"
 
-          cat <<EOF > src-tauri/gen/android/keystore.properties
-keyAlias=readest
-password=readest123
-storeFile=$KEYSTORE
-EOF
+          printf 'keyAlias=readest\npassword=readest123\nstoreFile=%s\n' "$KEYSTORE" > src-tauri/gen/android/keystore.properties
           cp src-tauri/gen/android/keystore.properties src-tauri/gen/android/app/keystore.properties || true
           echo "Configured src-tauri/gen/android/keystore.properties successfully."
 
