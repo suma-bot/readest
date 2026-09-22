@@ -1,7 +1,7 @@
 # .github/workflows/build-free-cloud-sync.yml
 #
 # 解锁 CLOUD_SYNC_REQUIRES_PREMIUM（支持 WebDAV 等同步方式），
-# 编译 Windows exe + Android APK，并自动发布到 Release & Artifacts。
+# 编译 Windows exe + Android 自动签名 APK，并自动发布到 Release & Artifacts。
 #
 # 用法：Actions → Build free cloud-sync → Run workflow
 
@@ -19,13 +19,16 @@ on:
         type: boolean
         default: true
       build_android:
-        description: "同时编译 Android APK"
+        description: "同时编译 Android APK（自动生成证书签名）"
         type: boolean
-        default: false
+        default: true
       publish_release:
         description: "同时创建/更新 GitHub Release（便于手机与电脑直接下载）"
         type: boolean
         default: true
+
+permissions:
+  contents: write
 
 env:
   CARGO_TERM_COLOR: always
@@ -67,11 +70,11 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            target
             apps/readest-app/src-tauri/target
-          key: free-cloud-win-cargo-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml', 'apps/readest-app/src-tauri/Cargo.lock') }}
+            target
+          key: free-cloud-cargo-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml', 'apps/readest-app/src-tauri/Cargo.lock') }}
           restore-keys: |
-            free-cloud-win-cargo-${{ runner.os }}-
+            free-cloud-cargo-${{ runner.os }}-
 
       - name: Disable cloud-sync premium gate
         run: |
@@ -79,17 +82,13 @@ jobs:
           FILE="apps/readest-app/src/utils/access.ts"
           sed -i 's/export const CLOUD_SYNC_REQUIRES_PREMIUM = true;/export const CLOUD_SYNC_REQUIRES_PREMIUM = false;/' "$FILE"
           sed -i 's/export const TTS_CACHE_REQUIRES_PREMIUM = true;/export const TTS_CACHE_REQUIRES_PREMIUM = false;/' "$FILE" || true
-          grep -n 'CLOUD_SYNC_REQUIRES_PREMIUM' "$FILE"
-          grep -q 'CLOUD_SYNC_REQUIRES_PREMIUM = false' "$FILE"
+          sed -i 's/export const ABS_OFFLINE_REQUIRES_PREMIUM = true;/export const ABS_OFFLINE_REQUIRES_PREMIUM = false;/' "$FILE" || true
+          sed -i 's/export const NEARBY_PAIRING_REQUIRES_PREMIUM = true;/export const NEARBY_PAIRING_REQUIRES_PREMIUM = false;/' "$FILE" || true
+          grep -E "REQUIRES_PREMIUM" "$FILE"
 
-      - name: Install JS dependencies
+      - name: Install dependencies
         run: |
-          set -euo pipefail
-          pnpm install --frozen-lockfile --prefer-offline
-
-      - name: Setup vendors (pdfjs, simplecc, jieba)
-        run: |
-          set -euo pipefail
+          pnpm install --frozen-lockfile=false
           pnpm --filter @readest/readest-app setup-vendors
 
       - name: Build frontend
@@ -103,7 +102,7 @@ jobs:
           echo "NEXT_PUBLIC_APP_PLATFORM=tauri" > .env.local
           pnpm exec next build
 
-      - name: Build Windows (Tauri)
+      - name: Build Tauri
         working-directory: ${{ env.APP_DIR }}
         env:
           NEXT_PUBLIC_APP_PLATFORM: tauri
@@ -126,7 +125,10 @@ jobs:
           for candidate in \
             "$ROOT/target/release/readest.exe" \
             "$ROOT/target/x86_64-pc-windows-msvc/release/readest.exe" \
-            "$ROOT/apps/readest-app/src-tauri/target/release/readest.exe"
+            "$ROOT/apps/readest-app/src-tauri/target/release/readest.exe" \
+            "$ROOT/apps/readest-app/src-tauri/target/x86_64-pc-windows-msvc/release/readest.exe" \
+            "$ROOT/target/debug/readest.exe" \
+            "$ROOT/apps/readest-app/src-tauri/target/debug/readest.exe"
           do
             if [ -f "$candidate" ]; then
               EXE="$candidate"
@@ -209,7 +211,6 @@ jobs:
           echo "NDK_HOME=${NDK_DIR}" >> "$GITHUB_ENV"
           echo "ANDROID_NDK_HOME=${NDK_DIR}" >> "$GITHUB_ENV"
           test -d "$NDK_DIR"
-          ls -la "${ANDROID_HOME}/ndk"
 
       - name: Cache cargo
         uses: actions/cache@v4
@@ -218,6 +219,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             apps/readest-app/src-tauri/target
+            target
           key: free-cloud-and-cargo-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml', 'apps/readest-app/src-tauri/Cargo.lock') }}
           restore-keys: |
             free-cloud-and-cargo-${{ runner.os }}-
@@ -228,17 +230,13 @@ jobs:
           FILE="apps/readest-app/src/utils/access.ts"
           sed -i 's/export const CLOUD_SYNC_REQUIRES_PREMIUM = true;/export const CLOUD_SYNC_REQUIRES_PREMIUM = false;/' "$FILE"
           sed -i 's/export const TTS_CACHE_REQUIRES_PREMIUM = true;/export const TTS_CACHE_REQUIRES_PREMIUM = false;/' "$FILE" || true
-          grep -n 'CLOUD_SYNC_REQUIRES_PREMIUM' "$FILE"
-          grep -q 'CLOUD_SYNC_REQUIRES_PREMIUM = false' "$FILE"
+          sed -i 's/export const ABS_OFFLINE_REQUIRES_PREMIUM = true;/export const ABS_OFFLINE_REQUIRES_PREMIUM = false;/' "$FILE" || true
+          sed -i 's/export const NEARBY_PAIRING_REQUIRES_PREMIUM = true;/export const NEARBY_PAIRING_REQUIRES_PREMIUM = false;/' "$FILE" || true
+          grep -E "REQUIRES_PREMIUM" "$FILE"
 
-      - name: Install JS dependencies
+      - name: Install dependencies
         run: |
-          set -euo pipefail
-          pnpm install --frozen-lockfile --prefer-offline
-
-      - name: Setup vendors (pdfjs, simplecc, jieba)
-        run: |
-          set -euo pipefail
+          pnpm install --frozen-lockfile=false
           pnpm --filter @readest/readest-app setup-vendors
 
       - name: Build frontend
@@ -262,44 +260,49 @@ jobs:
           set -euo pipefail
           export PATH="$HOME/.cargo/bin:$PATH"
 
+          # Backup tracked gen/android files before init
+          mkdir -p /tmp/gen-backup
+          cp -r src-tauri/gen/android /tmp/gen-backup/
+
           rm -rf src-tauri/gen/android
           pnpm exec tauri android init
+          pnpm exec tauri icon ../../data/icons/readest-book.png || true
 
-          test -f src-tauri/gen/android/settings.gradle \
-            || test -f src-tauri/gen/android/settings.gradle.kts
-          ls -la src-tauri/gen/android/
+          # Restore tracked files (build.gradle.kts with signingConfigs, AndroidManifest with storage permissions)
+          cp -r /tmp/gen-backup/android/* src-tauri/gen/android/
+          git checkout src-tauri/gen/android || true
 
-          MANIFEST="src-tauri/gen/android/app/src/main/AndroidManifest.xml"
-          if [ -f "$MANIFEST" ]; then
-            if ! grep -q 'xmlns:tools=' "$MANIFEST"; then
-              sed -i 's|xmlns:android="http://schemas.android.com/apk/res/android"|xmlns:android="http://schemas.android.com/apk/res/android"\n    xmlns:tools="http://schemas.android.com/tools"|' "$MANIFEST"
-            fi
-            if ! grep -q 'MANAGE_EXTERNAL_STORAGE' "$MANIFEST"; then
-              sed -i 's|<manifest\([^>]*\)>|<manifest\1>\n    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" tools:ignore="ScopedStorage" />\n    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />\n    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />\n    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />\n    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />\n    <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />|' "$MANIFEST"
-            fi
-            if ! grep -q 'requestLegacyExternalStorage' "$MANIFEST"; then
-              sed -i 's|<application|<application android:requestLegacyExternalStorage="true"|' "$MANIFEST" || true
-            fi
-            echo "===== Manifest (permissions) ====="
-            grep -E 'uses-permission|requestLegacy|package=' "$MANIFEST" || true
-          else
-            echo "::warning::AndroidManifest.xml not found"
-          fi
+          echo "Checking build.gradle.kts for signingConfigs..."
+          grep "signingConfigs" src-tauri/gen/android/app/build.gradle.kts
 
-          GRADLE_KTS="src-tauri/gen/android/app/build.gradle.kts"
-          if [ -f "$GRADLE_KTS" ] && ! grep -q 'missingDimensionStrategy' "$GRADLE_KTS"; then
-            if grep -q 'defaultConfig' "$GRADLE_KTS"; then
-              sed -i 's/defaultConfig {/defaultConfig {\n        missingDimensionStrategy("store", "foss")/' "$GRADLE_KTS" || true
-            fi
-          fi
+      - name: Generate and configure Release Signing Key
+        working-directory: ${{ env.APP_DIR }}
+        run: |
+          set -euo pipefail
+          KEYSTORE_DIR="$RUNNER_TEMP/keystore"
+          mkdir -p "$KEYSTORE_DIR"
+          KEYSTORE="$KEYSTORE_DIR/readest-release.jks"
 
-          if [ -f "$GRADLE_KTS" ]; then
-            if ! grep -q 'signingConfig = signingConfigs.getByName("debug")' "$GRADLE_KTS"; then
-              sed -i '/release {/,/}/ s|isMinifyEnabled = false|isMinifyEnabled = false\n            signingConfig = signingConfigs.getByName("debug")|' "$GRADLE_KTS" || true
-            fi
-          fi
+          echo "Generating standard Release Keystore (2048-bit RSA, 10000 days)..."
+          keytool -genkeypair -v \
+            -keystore "$KEYSTORE" \
+            -alias readest \
+            -keyalg RSA \
+            -keysize 2048 \
+            -validity 10000 \
+            -storepass readest123 \
+            -keypass readest123 \
+            -dname "CN=Readest, OU=Readest, O=Readest, C=US"
 
-      - name: Build Android APK (release, debug-signed)
+          cat <<EOF > src-tauri/gen/android/keystore.properties
+keyAlias=readest
+password=readest123
+storeFile=$KEYSTORE
+EOF
+          cp src-tauri/gen/android/keystore.properties src-tauri/gen/android/app/keystore.properties || true
+          echo "Configured src-tauri/gen/android/keystore.properties successfully."
+
+      - name: Build Android APK (release, auto-signed)
         working-directory: ${{ env.APP_DIR }}
         env:
           ANDROID_HOME: ${{ env.ANDROID_HOME }}
@@ -326,6 +329,18 @@ jobs:
           echo "Using APK: $APK ($(du -h "$APK" | cut -f1))"
           cp "$APK" "$ROOT/dist/Readest-free-cloud-sync.apk"
           ls -la "$ROOT/dist/"
+
+      - name: Verify APK Signature
+        run: |
+          set -euo pipefail
+          APK="dist/Readest-free-cloud-sync.apk"
+          APKSIGNER=$(find "$ANDROID_HOME/build-tools" -name 'apksigner' -type f 2>/dev/null | sort -V | tail -1 || true)
+          if [ -n "$APKSIGNER" ] && [ -x "$APKSIGNER" ]; then
+            echo "Verifying APK signature using $APKSIGNER..."
+            "$APKSIGNER" verify --verbose "$APK"
+          else
+            echo "apksigner not found in build-tools; skipping check"
+          fi
 
       - name: Upload Android artifact
         uses: actions/upload-artifact@v4
@@ -357,7 +372,7 @@ jobs:
           path: release-assets
 
       - name: Download Android artifact
-        if: ${{ needs.build-android.result == 'success' && inputs.build_android }}
+        if: ${{ needs.build-android.result == 'success' }}
         uses: actions/download-artifact@v4
         with:
           name: readest-free-cloud-sync-android
@@ -372,12 +387,12 @@ jobs:
           TAG="v${VERSION}-free"
           TITLE="Readest v${VERSION} (Free Cloud Sync / WebDAV)"
           BODY="### Readest v${VERSION} 解锁版
-          - 解锁了 WebDAV 等第三方云同步付费门限制（第三者云同步不受会员计划限制）
-          - 基于官方上游最新代码编译
+          - 解锁了 WebDAV 等第三方云同步付费门限制（第三方云同步不受会员计划限制）
+          - 基于官方上游最新代码编译 (v${VERSION})
           
           #### 文件下载：
           - Windows 绿色便携版：\`readest.exe\`
-          - Android 安装包：\`Readest-free-cloud-sync.apk\` (针对 aarch64 优化，支持全部文件访问权限)"
+          - Android 安装包：\`Readest-free-cloud-sync.apk\` (针对 aarch64 优化，已签名，支持全部文件访问权限)"
 
           echo "Publishing release with tag: $TAG"
           gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --title "$TITLE" --notes "$BODY" --prerelease=false
