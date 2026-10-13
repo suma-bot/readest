@@ -1,6 +1,7 @@
 import React from 'react';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -62,6 +63,11 @@ vi.mock('@/store/bookDataStore', () => ({
   useBookDataStore: () => ({ getBookData }),
 }));
 
+const saveViewSettings = vi.fn();
+vi.mock('@/helpers/settings', () => ({
+  saveViewSettings: (...args: unknown[]) => saveViewSettings(...args),
+}));
+
 vi.mock('@/store/readerProgressStore', () => ({
   useBookProgress: () => ({ sectionLabel: 'Chapter 5' }),
 }));
@@ -117,7 +123,11 @@ const makeProps = (overrides: Record<string, unknown> = {}) => ({
   onTogglePlay: vi.fn(),
   onBackward: vi.fn(),
   onForward: vi.fn(),
+  loopState: 'off' as 'off' | 'a' | 'ab',
+  onToggleLoop: vi.fn(),
+  onGetLyricLoopRange: vi.fn().mockReturnValue(null),
   onSetRate: vi.fn(),
+  clientsReady: true,
   onGetVoices: vi.fn().mockResolvedValue(voiceGroups),
   onSetVoice: vi.fn(),
   onGetVoiceId: vi.fn().mockReturnValue('ava'),
@@ -164,6 +174,7 @@ describe('TTSPlayerSheet', () => {
     // by one test leaks into the next.
     delete viewSettings['ttsVoice'];
     delete viewSettings['ttsUseNarration'];
+    delete viewSettings['ttsPauseAfterSentence'];
     getBookData.mockReturnValue({
       book: { title: 'Alice in Wonderland', coverImageUrl: null },
     });
@@ -175,6 +186,40 @@ describe('TTSPlayerSheet', () => {
   afterEach(() => {
     cleanup();
     vi.clearAllMocks();
+  });
+
+  test('opened while the clients initialize, it loads the voices once they are ready', async () => {
+    const props = makeProps({
+      clientsReady: false,
+      onGetVoices: vi.fn().mockResolvedValue([]),
+      onGetVoiceId: vi.fn().mockReturnValue(''),
+    });
+    const { rerender } = render(<TTSPlayerSheet {...props} />);
+    // Transport waits for the clients: a pause now would be undone by startup.
+    expect((screen.getByLabelText('Previous Paragraph') as HTMLButtonElement).disabled).toBe(true);
+    props.onGetVoices.mockResolvedValue(voiceGroups);
+    props.onGetVoiceId.mockReturnValue('ava');
+    rerender(<TTSPlayerSheet {...props} clientsReady />);
+    expect(await waitFor(() => screen.getByText('Ava'))).toBeTruthy();
+    expect(props.onGetVoices).toHaveBeenCalledTimes(2);
+    expect((screen.getByLabelText('Previous Paragraph') as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  test('a voice list that arrives after a newer one is discarded', async () => {
+    let answerEarly: (groups: typeof voiceGroups) => void = () => {};
+    const props = makeProps({
+      clientsReady: false,
+      onGetVoices: vi
+        .fn()
+        .mockImplementationOnce(() => new Promise((r) => (answerEarly = r)))
+        .mockResolvedValue(voiceGroups),
+    });
+    const { rerender } = render(<TTSPlayerSheet {...props} />);
+    rerender(<TTSPlayerSheet {...props} clientsReady />);
+    expect(await waitFor(() => screen.getByText('Ava'))).toBeTruthy();
+    // The request made before the clients were ready answers last, empty.
+    await act(async () => answerEarly([]));
+    expect(screen.getByText('Ava')).toBeTruthy();
   });
 
   test('shows title, chapter, scrubber, and transport on the main view', async () => {
@@ -279,6 +324,38 @@ describe('TTSPlayerSheet', () => {
     expect(props.onForward).toHaveBeenCalledWith(true);
     fireEvent.click(screen.getByLabelText('Next Paragraph'));
     expect(props.onForward).toHaveBeenCalledWith(false);
+  });
+
+  test('toggles sentence-by-sentence as a non-style view setting', () => {
+    render(<TTSPlayerSheet {...makeProps()} />);
+    const toggle = screen.getByLabelText('Pause After Each Sentence');
+    expect(toggle.getAttribute('aria-pressed')).toBe('false');
+    fireEvent.click(toggle);
+    expect(saveViewSettings).toHaveBeenCalledWith(
+      envConfig,
+      'b1',
+      'ttsPauseAfterSentence',
+      true,
+      false,
+      false,
+    );
+  });
+
+  test('the A-B button names its next step and toggles the loop', () => {
+    const props = makeProps();
+    const { rerender } = render(<TTSPlayerSheet {...props} />);
+    fireEvent.click(screen.getByLabelText('Set Repeat Start (A)'));
+    expect(props.onToggleLoop).toHaveBeenCalledTimes(1);
+    rerender(<TTSPlayerSheet {...props} loopState='a' />);
+    expect(screen.getByLabelText('Set Repeat End (B)')).toBeTruthy();
+    rerender(<TTSPlayerSheet {...props} loopState='ab' />);
+    expect(screen.getByLabelText('Clear A-B Repeat')).toBeTruthy();
+  });
+
+  test('a paired audiobook has no sentence modes', () => {
+    render(<TTSPlayerSheet {...makeProps({ audioTransport: true })} />);
+    expect(screen.queryByLabelText('Pause After Each Sentence')).toBeNull();
+    expect(screen.queryByLabelText('Set Repeat Start (A)')).toBeNull();
   });
 
   test('a paired audiobook gets seek and chapter transport with the same step semantics', () => {
@@ -453,7 +530,7 @@ describe('TTSPlayerSheet', () => {
     expect(screen.getByText('Premium')).toBeTruthy();
     expect(screen.getByText('Download chapters for offline playback')).toBeTruthy();
     fireEvent.click(screen.getByLabelText('Offline Audio'));
-    expect(routerPush).toHaveBeenCalledWith('/user');
+    expect(routerPush).toHaveBeenCalledWith(expect.stringMatching(/^\/user\?redirect=/));
     expect(props.onClose).toHaveBeenCalled();
     // The premium chapters view must not open for a free user.
     expect(screen.queryByText('chapters-view')).toBeNull();
@@ -521,6 +598,26 @@ describe('TTSPlayerSheet', () => {
 
     expect(viewSettings['ttsVoice']).toBe('guy');
     expect(viewSettings['ttsUseNarration']).toBeUndefined();
+  });
+
+  test('premium voices show the plan that unlocks them', async () => {
+    const groups = [
+      {
+        id: 'readest',
+        name: 'Readest Voice',
+        voices: [
+          { id: 'kokoro:zf_001', name: 'Zifang', lang: 'zh-CN', tier: 'plus' as const },
+          { id: 'omnivoice:xiaoyu', name: 'Xiaoyu', lang: 'zh-CN', tier: 'pro' as const },
+        ],
+      },
+      ...voiceGroups,
+    ];
+    render(<TTSPlayerSheet {...makeProps({ onGetVoices: vi.fn().mockResolvedValue(groups) })} />);
+    fireEvent.click(screen.getByLabelText('Voice'));
+    const row = (name: string) => screen.getByText(name).closest('button')!;
+    expect((await waitFor(() => row('Xiaoyu'))).textContent).toBe('XiaoyuPro');
+    expect(row('Zifang').textContent).toBe('ZifangPlus');
+    expect(row('Guy').textContent).toBe('Guy');
   });
 
   test('reopening the sheet returns to the main view', async () => {
