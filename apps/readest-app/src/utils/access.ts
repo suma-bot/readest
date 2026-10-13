@@ -193,10 +193,13 @@ export const isCustomizationAllowed = (plan: UserPlan, customizationPurchased: b
  * client-side gate, like the TTS cache. It reads the session token directly so
  * a reader window never sees a premium user as free while the plan loads.
  */
+export const CUSTOM_TRANSLATOR_REQUIRES_PREMIUM = false;
+
 export const isCustomTranslatorAllowed = (token: string | null | undefined): boolean =>
-  token
+  !CUSTOM_TRANSLATOR_REQUIRES_PREMIUM ||
+  (token
     ? isCustomizationAllowed(getUserProfilePlan(token), getCustomizationPurchased(token))
-    : isSelfHosted();
+    : isSelfHosted());
 
 export const STORAGE_QUOTA_GRACE_BYTES = 10 * 1024 * 1024; // 10 MB grace
 
