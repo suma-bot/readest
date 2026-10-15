@@ -84,6 +84,8 @@ jobs:
           sed -i 's/export const TTS_CACHE_REQUIRES_PREMIUM = true;/export const TTS_CACHE_REQUIRES_PREMIUM = false;/' "$FILE" || true
           sed -i 's/export const ABS_OFFLINE_REQUIRES_PREMIUM = true;/export const ABS_OFFLINE_REQUIRES_PREMIUM = false;/' "$FILE" || true
           sed -i 's/export const NEARBY_PAIRING_REQUIRES_PREMIUM = true;/export const NEARBY_PAIRING_REQUIRES_PREMIUM = false;/' "$FILE" || true
+          sed -i 's/export const isCustomTranslatorAllowed = .*/export const isCustomTranslatorAllowed = (_token: string | null | undefined): boolean => true;/' "$FILE" || true
+          sed -i 's/export const isCustomTTSAllowed = .*/export const isCustomTTSAllowed = (_token?: string | null | undefined): boolean => true;/' "$FILE" || true
           grep -E "REQUIRES_PREMIUM" "$FILE"
 
       - name: Install dependencies
@@ -232,6 +234,8 @@ jobs:
           sed -i 's/export const TTS_CACHE_REQUIRES_PREMIUM = true;/export const TTS_CACHE_REQUIRES_PREMIUM = false;/' "$FILE" || true
           sed -i 's/export const ABS_OFFLINE_REQUIRES_PREMIUM = true;/export const ABS_OFFLINE_REQUIRES_PREMIUM = false;/' "$FILE" || true
           sed -i 's/export const NEARBY_PAIRING_REQUIRES_PREMIUM = true;/export const NEARBY_PAIRING_REQUIRES_PREMIUM = false;/' "$FILE" || true
+          sed -i 's/export const isCustomTranslatorAllowed = .*/export const isCustomTranslatorAllowed = (_token: string | null | undefined): boolean => true;/' "$FILE" || true
+          sed -i 's/export const isCustomTTSAllowed = .*/export const isCustomTTSAllowed = (_token?: string | null | undefined): boolean => true;/' "$FILE" || true
           grep -E "REQUIRES_PREMIUM" "$FILE"
 
       - name: Install dependencies
