@@ -385,6 +385,7 @@ jobs:
           set -euo pipefail
           VERSION=$(node -p "require('./apps/readest-app/package.json').version")
           TAG="v${VERSION}-free"
+          TITLE="Readest v${VERSION} (Free Cloud Sync / WebDAV)"
           BODY="### Readest v${VERSION} 解锁版
           - 解锁了 WebDAV 等第三方云同步付费门限制（第三方云同步不受会员计划限制）
           - 解锁了自定义翻译（Custom Translator / OpenAI / DeepL）
