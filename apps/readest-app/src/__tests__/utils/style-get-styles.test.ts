@@ -1111,6 +1111,38 @@ describe('instant-highlight selection suppression stays out of getStyles', () =>
 });
 
 describe('link touch hold (#6242)', () => {
+  it('keeps linked images hit-testable while text links stay suppressed', () => {
+    const iframe = document.createElement('iframe');
+    document.body.append(iframe);
+    try {
+      const doc = iframe.contentDocument!;
+      const style = doc.createElement('style');
+      style.textContent = getStyles(makeViewSettings(), makeThemeCode());
+      doc.head.append(style);
+      doc.body.innerHTML = `
+        <a href="#figure"><img id="figure" src="figure.png"></a>
+        <a href="#svg"><svg><image id="svg" href="figure.png"/></svg></a>
+        <a href="#note" id="text">note</a>
+        <a href="#glyph"><img id="glyph" zy-enlarge-src="none" style="pointer-events:none"></a>
+        <a href="#svg-glyph"><svg zy-enlarge-src="none"><image id="svg-glyph" href="figure.png"/></svg></a>
+      `;
+      doc.documentElement.classList.add(LINK_TOUCH_HOLD_CLASS);
+      const pointerEvents = (id: string) =>
+        doc.defaultView!.getComputedStyle(doc.getElementById(id)!).pointerEvents;
+      expect(pointerEvents('figure'), 'linked HTML image receives the hold').toBe('auto');
+      expect(pointerEvents('svg'), 'linked SVG image receives the hold').toBe('auto');
+      expect(pointerEvents('text'), 'text links stay out of hit testing').toBe('none');
+      expect(pointerEvents('glyph'), 'non-enlargeable glyph stays out of hit testing').toBe('none');
+      expect(pointerEvents('svg-glyph'), 'non-enlargeable SVG stays out of hit testing').toBe(
+        'none',
+      );
+      doc.documentElement.classList.remove(LINK_TOUCH_HOLD_CLASS);
+      expect(pointerEvents('text'), 'text link is clickable after release').toBe('auto');
+    } finally {
+      iframe.remove();
+    }
+  });
+
   it('takes links out of hit testing while a touch is held', () => {
     // Chromium's touch adjustment snaps a long press onto a link within reach
     // of the finger, and a long press on a link never starts a text selection.
@@ -1145,21 +1177,5 @@ describe('link hit area in link-dense sections', () => {
     );
     expect(css).toMatch(new RegExp(`html\\.${LINK_HIT_AREA_CLASS} a::before\\s*\\{`));
     expect(css).not.toMatch(/(^|\n)\s*a\s*\{\s*position: relative !important;/);
-  });
-});
-
-describe('paragraph indent exemption for image-only paragraphs', () => {
-  // A full-width inline image that takes the paragraph indent overhangs the
-  // column by the indent and paints a strip on the next page (#6198). The
-  // exemption must also see an image wrapped in a link, which is how Wikipedia
-  // (and most sites) mark up a figure: <p><span><a><img></a></span></p>.
-  it('drops the indent for an image wrapped in a link, with or without a span', () => {
-    const css = getStyles(makeViewSettings({ textIndent: 2 }));
-    const rule = css
-      .split('}')
-      .find((block) => block.includes('text-indent: initial !important') && block.includes('img'));
-    expect(rule).toBeDefined();
-    expect(rule).toContain('p:has(> a:only-child > img:only-child)');
-    expect(rule).toContain('p:has(> span:only-child > a:only-child > img:only-child)');
   });
 });

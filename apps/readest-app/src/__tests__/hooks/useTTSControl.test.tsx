@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // --- Dependency mocks (must be set up before importing the hook) ---
@@ -303,6 +303,7 @@ vi.mock('@/utils/ttsTime', () => ({
 
 // Imports must come AFTER vi.mock calls so they pick up the mocked modules.
 import { useTTSControl } from '@/app/reader/hooks/useTTSControl';
+import { TTSController } from '@/services/tts';
 import { ttsMediaBridge } from '@/services/tts/ttsMediaBridge';
 import { eventDispatcher } from '@/utils/event';
 import { pageBreakFraction } from '@/utils/ttsPageFollow';
@@ -448,6 +449,29 @@ describe('useTTSControl changing the voice', () => {
       await hookApi!.handleSetVoice('edge:en-US-AvaNeural', 'en');
     });
     expect(mockDownloadManager.restartBook).toHaveBeenCalledWith('book');
+  });
+
+  it('reads on with the new voice when asked to, though reading is stopped', async () => {
+    render(<ApiHarness />);
+    await act(async () => {
+      const started = eventDispatcher.dispatch('tts-speak', { bookKey: 'book-1' });
+      for (let i = 0; i < 10; i++) await Promise.resolve();
+      while (pendingInitResolvers.length > 0) pendingInitResolvers.shift()!();
+      await started;
+    });
+    const controller = ttsControllerInstances.at(-1) as {
+      state: string;
+      start: ReturnType<typeof vi.fn>;
+      setVoice: ReturnType<typeof vi.fn>;
+    };
+    // A voice preview stopped reading.
+    controller.state = 'stop-paused';
+    controller.start.mockClear();
+    await act(async () => {
+      await hookApi!.handleSetVoice('edge:en-US-GuyNeural', 'en', true);
+    });
+    expect(controller.setVoice).toHaveBeenCalledWith('edge:en-US-GuyNeural', 'en');
+    await waitFor(() => expect(controller.start).toHaveBeenCalled());
   });
 });
 
@@ -850,11 +874,23 @@ describe('useTTSControl handleHighlightMark cross-section navigation', () => {
     mockProgress.range = null;
     mockViewSettings.ttsLocation = null;
     vi.mocked(pageBreakFraction).mockReturnValue(null);
+    // jsdom lays nothing out: give every range the box rendered text has.
+    Range.prototype.getClientRects = () => [VISIBLE_RECT] as unknown as DOMRectList;
   });
 
   afterEach(() => {
     cleanup();
+    delete (Range.prototype as Partial<Range>).getClientRects;
   });
+
+  const VISIBLE_RECT = { x: 40, y: 120, width: 300, height: 24 } as DOMRect;
+  // Text the book hides but still reads aloud (#7153): a display:none long
+  // description has no box, screen-reader text sits off the left edge.
+  const unrenderedRange = (rects: Partial<DOMRect>[]) => {
+    const range = new Range();
+    range.getClientRects = () => rects as unknown as DOMRectList;
+    return range;
+  };
 
   const setupAndCaptureHighlightHandler = async (
     eventName: 'tts-highlight-mark' | 'tts-highlight-word' = 'tts-highlight-mark',
@@ -1025,6 +1061,56 @@ describe('useTTSControl handleHighlightMark cross-section navigation', () => {
     }).not.toThrow();
   });
 
+  it('holds the page for a sentence the book hides (#7153)', async () => {
+    const handler = await setupAndCaptureHighlightHandler();
+    for (const rects of [[], [{ x: -10000, y: 300, width: 1, height: 1 }]]) {
+      mockView.resolveCFI.mockReturnValue({ index: 0, anchor: () => unrenderedRange(rects) });
+      await act(async () => {
+        handler(new CustomEvent('tts-highlight-mark', { detail: { cfi: 'epubcfi(/6/4!/4/8)' } }));
+      });
+    }
+    // foliate settles an anchor with no box on the section start.
+    expect(mockView.renderer.scrollToAnchor).not.toHaveBeenCalled();
+    expect(mockViewSettings.ttsLocation).toBe('epubcfi(/6/4!/4/8)');
+
+    // The next shown sentence is followed again.
+    const shown = new Range();
+    mockView.resolveCFI.mockReturnValue({ index: 0, anchor: () => shown });
+    await act(async () => {
+      handler(new CustomEvent('tts-highlight-mark', { detail: { cfi: 'epubcfi(/6/4!/4/10)' } }));
+    });
+    expect(mockView.renderer.scrollToAnchor).toHaveBeenCalledWith(shown);
+  });
+
+  it('holds the scrolled view for a sentence the book hides (#7153)', async () => {
+    const handler = await setupAndCaptureHighlightHandler();
+    mockView.renderer.scrolled = true;
+    const range = unrenderedRange([]);
+    range.getBoundingClientRect = () => ({ x: 0, y: 0, width: 0, height: 0 }) as DOMRect;
+    mockView.renderer.start = 800;
+    mockView.resolveCFI.mockReturnValue({ index: 0, anchor: () => range });
+    try {
+      await act(async () => {
+        handler(new CustomEvent('tts-highlight-mark', { detail: { cfi: 'epubcfi(/6/4!/4/8)' } }));
+      });
+      expect(mockView.renderer.scrollToAnchor).not.toHaveBeenCalled();
+    } finally {
+      mockView.renderer.start = 0;
+    }
+  });
+
+  it('holds the page for a spoken word the book hides (#7153)', async () => {
+    const handler = await setupAndCaptureHighlightHandler('tts-highlight-word');
+    const wordRange = unrenderedRange([]);
+    wordRange.compareBoundaryPoints = vi.fn().mockReturnValue(1);
+    mockProgress.range = {} as Range;
+    mockView.resolveCFI.mockReturnValue({ index: 0, anchor: () => wordRange });
+
+    handler(new CustomEvent('tts-highlight-word', { detail: { cfi: 'epubcfi(/6/4!/4/8)' } }));
+
+    expect(mockView.renderer.scrollToAnchor).not.toHaveBeenCalled();
+  });
+
   it('bails without scrolling when the cfi resolves to a null range (READEST-21)', async () => {
     const handler = await setupAndCaptureHighlightHandler();
     // In-section (index 0 == primaryIndex 0) so the follow-scroll path runs,
@@ -1062,6 +1148,7 @@ describe('useTTSControl handleHighlightMark cross-section navigation', () => {
     const handler = await setupAndCaptureHighlightHandler('tts-highlight-word');
     const wordRange = {
       compareBoundaryPoints: vi.fn().mockReturnValueOnce(1).mockReturnValueOnce(0),
+      getClientRects: () => [VISIBLE_RECT],
     } as unknown as Range;
     const visibleRange = {} as Range;
     mockView.renderer.primaryIndex = 1;
@@ -1079,6 +1166,7 @@ describe('useTTSControl handleHighlightMark cross-section navigation', () => {
     const handler = await setupAndCaptureHighlightHandler('tts-highlight-word');
     const wordRange = {
       compareBoundaryPoints: vi.fn().mockReturnValueOnce(1).mockReturnValueOnce(0),
+      getClientRects: () => [VISIBLE_RECT],
     } as unknown as Range;
     mockProgress.range = {} as Range;
     mockView.resolveCFI.mockReturnValue({ index: 0, anchor: () => wordRange });
@@ -1086,6 +1174,143 @@ describe('useTTSControl handleHighlightMark cross-section navigation', () => {
     handler(new CustomEvent('tts-highlight-word', { detail: { cfi: 'epubcfi(/6/4!/4/2)' } }));
 
     expect(mockView.renderer.scrollToAnchor).toHaveBeenCalledWith(wordRange);
+  });
+
+  // Following the voice focuses the spoken text inside the book's iframe and
+  // turns the page, which takes the caret (and an IME composition) out of a
+  // note being typed and closes its popup (#6837). While a host text area has
+  // focus the view holds still; the saved location still advances.
+  describe('while a note is being typed (#6837)', () => {
+    let editor: HTMLTextAreaElement;
+
+    beforeEach(() => {
+      editor = document.createElement('textarea');
+      editor.setAttribute('data-note-editor', '');
+      document.body.appendChild(editor);
+      editor.focus();
+    });
+
+    afterEach(() => {
+      editor.remove();
+    });
+
+    it('does not scroll to the next sentence but still saves its location', async () => {
+      const handler = await setupAndCaptureHighlightHandler();
+      mockView.resolveCFI.mockReturnValue({ index: 0, anchor: () => new Range() });
+
+      await act(async () => {
+        handler(new CustomEvent('tts-highlight-mark', { detail: { cfi: 'epubcfi(/6/4!/4/2)' } }));
+      });
+
+      expect(mockView.renderer.scrollToAnchor).not.toHaveBeenCalled();
+      expect(mockViewSettings.ttsLocation).toBe('epubcfi(/6/4!/4/2)');
+      expect(document.activeElement).toBe(editor);
+    });
+
+    it('does not navigate to a sentence in the next section', async () => {
+      const handler = await setupAndCaptureHighlightHandler();
+      mockView.resolveCFI.mockReturnValue({ index: 1, anchor: () => new Range() });
+
+      await act(async () => {
+        handler(new CustomEvent('tts-highlight-mark', { detail: { cfi: 'epubcfi(/6/8!/4/2)' } }));
+      });
+
+      expect(mockView.goTo).not.toHaveBeenCalled();
+    });
+
+    it('does not follow a word off the page', async () => {
+      const handler = await setupAndCaptureHighlightHandler('tts-highlight-word');
+      const wordRange = {
+        compareBoundaryPoints: vi.fn().mockReturnValueOnce(1).mockReturnValueOnce(0),
+      } as unknown as Range;
+      mockProgress.range = {} as Range;
+      mockView.resolveCFI.mockReturnValue({ index: 0, anchor: () => wordRange });
+
+      handler(new CustomEvent('tts-highlight-word', { detail: { cfi: 'epubcfi(/6/4!/4/2)' } }));
+
+      expect(mockView.renderer.scrollToAnchor).not.toHaveBeenCalled();
+    });
+
+    it('does not turn the page for a sentence that started before typing', async () => {
+      editor.blur();
+      vi.useFakeTimers();
+      try {
+        const handler = await setupAndCaptureHighlightHandler();
+        const controller = ttsControllerInstances[0] as unknown as {
+          getSentenceProgress: ReturnType<typeof vi.fn>;
+          state: string;
+        };
+        controller.state = 'playing';
+        vi.mocked(pageBreakFraction).mockReturnValue(0.75);
+        mockView.renderer.end = 528;
+        mockView.resolveCFI.mockReturnValue({ index: 0, anchor: () => new Range() });
+        controller.getSentenceProgress.mockReturnValue(0);
+
+        await act(async () => {
+          handler(new CustomEvent('tts-highlight-mark', { detail: { cfi: 'epubcfi(/6/4!/4/2)' } }));
+        });
+
+        editor.focus();
+        controller.getSentenceProgress.mockReturnValue(0.8);
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(400);
+        });
+        expect(mockView.renderer.next).not.toHaveBeenCalled();
+      } finally {
+        mockView.renderer.end = 0;
+        mockView.renderer.next = vi.fn();
+        vi.useRealTimers();
+      }
+    });
+
+    it('does not move the view to the next section the voice starts', async () => {
+      await setupAndCaptureHighlightHandler();
+      const onSectionChange = vi.mocked(TTSController).mock.calls.at(-1)![4] as (
+        index: number,
+      ) => Promise<void>;
+      mockView.renderer.goTo.mockClear();
+
+      await act(async () => {
+        await onSectionChange(0);
+      });
+      expect(mockView.renderer.goTo).not.toHaveBeenCalled();
+
+      editor.blur();
+      await act(async () => {
+        await onSectionChange(0);
+      });
+      expect(mockView.renderer.goTo).toHaveBeenCalledTimes(1);
+    });
+
+    it('keeps following while a text field that is not a note editor has focus', async () => {
+      const handler = await setupAndCaptureHighlightHandler();
+      mockView.resolveCFI.mockReturnValue({ index: 0, anchor: () => new Range() });
+      const templateField = document.createElement('textarea');
+      document.body.appendChild(templateField);
+      templateField.focus();
+
+      try {
+        await act(async () => {
+          handler(new CustomEvent('tts-highlight-mark', { detail: { cfi: 'epubcfi(/6/4!/4/2)' } }));
+        });
+
+        expect(mockView.renderer.scrollToAnchor).toHaveBeenCalledTimes(1);
+      } finally {
+        templateField.remove();
+      }
+    });
+
+    it('follows again once the note editor loses focus', async () => {
+      const handler = await setupAndCaptureHighlightHandler();
+      mockView.resolveCFI.mockReturnValue({ index: 0, anchor: () => new Range() });
+      editor.blur();
+
+      await act(async () => {
+        handler(new CustomEvent('tts-highlight-mark', { detail: { cfi: 'epubcfi(/6/4!/4/2)' } }));
+      });
+
+      expect(mockView.renderer.scrollToAnchor).toHaveBeenCalledTimes(1);
+    });
   });
 });
 
